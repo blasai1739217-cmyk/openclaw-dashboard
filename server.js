@@ -1916,7 +1916,36 @@ const server = http.createServer((req, res) => {
         }
         const lines = Math.min(Math.max(parseInt(params.get('lines')) || 100, 1), 1000);
         const { execSync } = require('child_process');
-        const logs = execSync(`journalctl -u ${service} --no-pager -n ${lines} -o short 2>/dev/null || echo "No logs available"`, { encoding: 'utf8', timeout: 10000 });
+        const serviceUnitCandidates = {
+          openclaw: ['openclaw', 'openclaw-gateway', 'openclaw-webhooks'],
+          'agent-dashboard': ['agent-dashboard'],
+          tailscaled: ['tailscaled'],
+          sshd: ['sshd'],
+          nginx: ['nginx']
+        };
+        const units = serviceUnitCandidates[service] || [service];
+        const scopes = ['system', 'user'];
+        let logs = '';
+        let source = '';
+        for (const scope of scopes) {
+          for (const unit of units) {
+            try {
+              const scopeFlag = scope === 'user' ? '--user ' : '';
+              const out = execSync(`journalctl ${scopeFlag}-u ${unit} --no-pager -n ${lines} -o short 2>/dev/null`, { encoding: 'utf8', timeout: 10000 });
+              if (out && out.trim() && !out.includes('-- No entries --')) {
+                logs = out;
+                source = `${scope}:${unit}`;
+                break;
+              }
+            } catch {}
+          }
+          if (logs) break;
+        }
+        if (!logs) {
+          logs = `No logs available for "${service}". Tried units: ${units.join(', ')} in system + user journal.`;
+        } else {
+          logs = `[source ${source}]\n${logs}`;
+        }
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end(logs);
       } catch (e) {
