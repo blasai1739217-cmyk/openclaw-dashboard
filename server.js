@@ -33,6 +33,9 @@ const scrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-claude-usage.sh
 const geminiScrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-gemini-usage.sh');
 const pricingFile = path.join(WORKSPACE_DIR, 'data', 'model_pricing_usd_per_million.json');
 
+// Multi-agent configuration
+const AGENTS_CONFIG_FILE = path.join(__dirname, 'agents.json');
+
 const htmlPath = path.join(__dirname, 'index.html');
 
 const DEFAULT_MODEL_PRICING = {
@@ -103,6 +106,81 @@ function loadModelPricing() {
 }
 
 const MODEL_PRICING = loadModelPricing();
+
+// Multi-agent support functions
+function loadAgentsConfig() {
+  try {
+    if (!fs.existsSync(AGENTS_CONFIG_FILE)) return { agents: [] };
+    return JSON.parse(fs.readFileSync(AGENTS_CONFIG_FILE, 'utf8'));
+  } catch {
+    return { agents: [] };
+  }
+}
+
+function getAgentById(agentId) {
+  const config = loadAgentsConfig();
+  return (config.agents || []).find(a => a.id === agentId);
+}
+
+function proxyToAgent(agent, req, res, apiPath) {
+  const agentUrl = new URL(agent.url);
+  const options = {
+    hostname: agentUrl.hostname,
+    port: agentUrl.port || 80,
+    path: apiPath,
+    method: req.method,
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    timeout: 30000
+  };
+
+  if (agent.token) {
+    options.headers['Authorization'] = `Bearer ${agent.token}`;
+  }
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error(`Proxy error to ${agent.name}:`, err.message);
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Failed to connect to agent "${agent.name}": ${err.message}` }));
+  });
+
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy();
+    res.writeHead(504, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Timeout connecting to agent "${agent.name}"` }));
+  });
+
+  if (req.method === 'POST' || req.method === 'PUT') {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+}
+
+// Proxyable API endpoints (read-only data endpoints that agent-server.js exposes)
+const PROXYABLE_ENDPOINTS = new Set([
+  '/api/sessions',
+  '/api/usage',
+  '/api/costs',
+  '/api/system',
+  '/api/memory-files',
+  '/api/crons',
+  '/api/claude-usage',
+  '/api/gemini-usage'
+]);
+
+function isProxyableEndpoint(pathname) {
+  if (PROXYABLE_ENDPOINTS.has(pathname)) return true;
+  if (pathname.startsWith('/api/memory-file?') || pathname === '/api/memory-file') return true;
+  if (pathname.startsWith('/api/logs?') || pathname === '/api/logs') return true;
+  return false;
+}
 
 function estimateMsgCost(msg) {
   const usage = msg && msg.usage ? msg.usage : {};
@@ -1488,12 +1566,57 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'OPTIONS') {
     setSameSiteCORS(req, res);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Agent-Id');
     res.setHeader('Access-Control-Max-Age', '86400');
     res.writeHead(204);
     res.end();
     return;
+  }
+
+  // Multi-agent: /api/agents endpoint returns list of configured agents
+  if (req.url === '/api/agents') {
+    if (!requireAuth(req, res)) return;
+    const config = loadAgentsConfig();
+    const agents = (config.agents || []).map(a => ({
+      id: a.id,
+      name: a.name,
+      emoji: a.emoji,
+      isLocal: a.url === 'local'
+    }));
+    setSameSiteCORS(req, res);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ agents }));
+    return;
+  }
+
+  // Multi-agent: Proxy requests to remote agents if X-Agent-Id header is present
+  const agentId = req.headers['x-agent-id'];
+  if (agentId && req.url.startsWith('/api/')) {
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const pathname = parsedUrl.pathname;
+
+    // Only proxy to non-local agents for proxyable endpoints
+    if (isProxyableEndpoint(pathname)) {
+      const agent = getAgentById(agentId);
+
+      if (!agent) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Agent "${agentId}" not found` }));
+        return;
+      }
+
+      // If it's a local agent, continue with normal handling
+      if (agent.url === 'local') {
+        // Fall through to normal request handling
+      } else {
+        // Proxy to remote agent
+        if (!requireAuth(req, res)) return;
+        setSameSiteCORS(req, res);
+        proxyToAgent(agent, req, res, req.url);
+        return;
+      }
+    }
   }
 
   if (req.url === '/api/auth/status') {

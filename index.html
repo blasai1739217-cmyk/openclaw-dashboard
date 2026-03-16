@@ -98,6 +98,119 @@ body {
   opacity: 1;
 }
 
+/* Agent Switcher */
+.agent-switcher {
+  position: relative;
+  margin-top: 8px;
+}
+
+.agent-switcher-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  transition: all 0.2s;
+}
+
+.agent-switcher-btn:hover {
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
+
+.agent-emoji {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.agent-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.sidebar:hover .agent-name {
+  opacity: 1;
+}
+
+.agent-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.agent-status.online {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.agent-status.offline {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red);
+}
+
+.agent-status.checking {
+  background: var(--yellow);
+  animation: pulse 1s infinite;
+}
+
+.agent-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  display: none;
+}
+
+.agent-dropdown.open {
+  display: block;
+}
+
+.agent-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.agent-option:hover {
+  background: var(--bg-tertiary);
+}
+
+.agent-option.selected {
+  background: rgba(99, 102, 241, 0.15);
+  border-left: 2px solid var(--accent);
+}
+
+.agent-option .agent-emoji {
+  font-size: 16px;
+}
+
+.agent-option .agent-name {
+  opacity: 1;
+  font-size: 13px;
+}
+
 .nav {
   flex: 1;
   padding: 16px 0;
@@ -1375,6 +1488,14 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
     <div class="sidebar-header">
       <div class="logo">✨</div>
       <div class="brand">Agent</div>
+      <div class="agent-switcher" id="agentSwitcher" style="display:none;">
+        <div class="agent-switcher-btn" onclick="toggleAgentDropdown(event)">
+          <span class="agent-emoji" id="currentAgentEmoji">🦞</span>
+          <span class="agent-name" id="currentAgentName">Blas</span>
+          <span class="agent-status checking" id="agentStatusDot"></span>
+        </div>
+        <div class="agent-dropdown" id="agentDropdown"></div>
+      </div>
     </div>
     <nav class="nav">
       <div class="nav-item active" data-page="overview">
@@ -2292,6 +2413,13 @@ function getApiBasePath() {
 
 const API_BASE = getApiBasePath();
 let sysSecAuthed = false;
+
+// Multi-agent support
+const SELECTED_AGENT_KEY = 'selectedAgentId';
+let availableAgents = [];
+let currentAgentId = localStorage.getItem(SELECTED_AGENT_KEY) || 'blas';
+let agentStatuses = {};
+
 const TOKEN_KEY = 'dashboardToken';
 const TOKEN_EXPIRY_KEY = 'dashboardTokenExpiry';
 const TOKEN_LIFETIME = 24 * 60 * 60 * 1000;
@@ -2671,13 +2799,17 @@ async function handleLogout() {
 function showApp() {
   document.getElementById('loginPage').style.display = 'none';
   document.getElementById('mainApp').style.display = 'flex';
+
+  // Load multi-agent configuration
+  loadAgents();
+
   fetchData();
   fetchNewData();
   fetchHealthHistory();
   fetchMemoryFiles();
   fetchKeyFiles();
   checkMFAStatus();
-  
+
   if (localStorage.getItem('usageAutoRefresh') === '1') {
     const cb = document.getElementById('usageAutoRefresh');
     if (cb) { cb.checked = true; toggleUsageAutoRefresh(true, true); }
@@ -2687,6 +2819,9 @@ function showApp() {
   setInterval(fetchHealthHistory, 60000);
   setInterval(fetchMemoryFiles, 30000);
   setInterval(fetchKeyFiles, 30000);
+
+  // Periodically check agent status
+  setInterval(checkAgentStatus, 60000);
 }
 
 function showLogin() {
@@ -2732,13 +2867,17 @@ function authFetch(url, options = {}) {
     showLogin();
     throw new Error('Not authenticated');
   }
-  
+
   options.headers = options.headers || {};
   options.headers['Authorization'] = `Bearer ${token}`;
+  // Multi-agent: include selected agent ID in all API requests
+  if (currentAgentId) {
+    options.headers['X-Agent-Id'] = currentAgentId;
+  }
   if (typeof options.cache === 'undefined') {
     options.cache = 'no-store';
   }
-  
+
   return fetch(url, options).then(res => {
     if (res.status === 401) {
       clearStoredToken();
@@ -2747,6 +2886,145 @@ function authFetch(url, options = {}) {
     }
     return res;
   });
+}
+
+// ========================================
+// Multi-Agent Support Functions
+// ========================================
+
+async function loadAgents() {
+  try {
+    const res = await authFetch(API_BASE + '/api/agents');
+    if (res.ok) {
+      const data = await res.json();
+      availableAgents = data.agents || [];
+
+      // If we have agents, show the switcher
+      if (availableAgents.length > 1) {
+        document.getElementById('agentSwitcher').style.display = 'block';
+
+        // Check if stored agent is still valid
+        const storedAgent = availableAgents.find(a => a.id === currentAgentId);
+        if (!storedAgent && availableAgents.length > 0) {
+          currentAgentId = availableAgents[0].id;
+          localStorage.setItem(SELECTED_AGENT_KEY, currentAgentId);
+        }
+
+        updateAgentSwitcherUI();
+        renderAgentDropdown();
+        checkAgentStatus();
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load agents:', err);
+  }
+}
+
+function updateAgentSwitcherUI() {
+  const agent = availableAgents.find(a => a.id === currentAgentId);
+  if (agent) {
+    document.getElementById('currentAgentEmoji').textContent = agent.emoji || '🤖';
+    document.getElementById('currentAgentName').textContent = agent.name || agent.id;
+  }
+}
+
+function renderAgentDropdown() {
+  const dropdown = document.getElementById('agentDropdown');
+  dropdown.innerHTML = availableAgents.map(agent => `
+    <div class="agent-option ${agent.id === currentAgentId ? 'selected' : ''}"
+         onclick="selectAgent('${agent.id}')">
+      <span class="agent-emoji">${agent.emoji || '🤖'}</span>
+      <span class="agent-name">${agent.name || agent.id}</span>
+      <span class="agent-status ${agentStatuses[agent.id] || 'checking'}" id="status-${agent.id}"></span>
+    </div>
+  `).join('');
+}
+
+function toggleAgentDropdown(event) {
+  event.stopPropagation();
+  const dropdown = document.getElementById('agentDropdown');
+  dropdown.classList.toggle('open');
+
+  // Close dropdown when clicking outside
+  if (dropdown.classList.contains('open')) {
+    setTimeout(() => {
+      document.addEventListener('click', closeAgentDropdown, { once: true });
+    }, 0);
+  }
+}
+
+function closeAgentDropdown() {
+  document.getElementById('agentDropdown').classList.remove('open');
+}
+
+async function selectAgent(agentId) {
+  if (agentId === currentAgentId) {
+    closeAgentDropdown();
+    return;
+  }
+
+  currentAgentId = agentId;
+  localStorage.setItem(SELECTED_AGENT_KEY, agentId);
+
+  closeAgentDropdown();
+  updateAgentSwitcherUI();
+  renderAgentDropdown();
+
+  // Reload all dashboard data for the new agent
+  await reloadDashboardData();
+}
+
+async function checkAgentStatus() {
+  const statusDot = document.getElementById('agentStatusDot');
+
+  for (const agent of availableAgents) {
+    const statusEl = document.getElementById('status-' + agent.id);
+    if (statusEl) statusEl.className = 'agent-status checking';
+
+    try {
+      // For local agent, always online
+      if (agent.isLocal) {
+        agentStatuses[agent.id] = 'online';
+      } else {
+        // For remote agents, try to fetch system stats
+        const res = await authFetch(API_BASE + '/api/system', {
+          headers: { 'X-Agent-Id': agent.id }
+        });
+        agentStatuses[agent.id] = res.ok ? 'online' : 'offline';
+      }
+    } catch (err) {
+      agentStatuses[agent.id] = 'offline';
+    }
+
+    if (statusEl) statusEl.className = 'agent-status ' + agentStatuses[agent.id];
+  }
+
+  // Update main status dot
+  if (statusDot) {
+    statusDot.className = 'agent-status ' + (agentStatuses[currentAgentId] || 'checking');
+  }
+}
+
+async function reloadDashboardData() {
+  // Show loading state
+  const statusDot = document.getElementById('agentStatusDot');
+  if (statusDot) statusDot.className = 'agent-status checking';
+
+  try {
+    // Reload core dashboard data
+    await Promise.all([
+      fetchData(),
+      fetchNewData(),
+      fetchHealthHistory(),
+      fetchMemoryFiles()
+    ]);
+
+    // Update status
+    if (statusDot) statusDot.className = 'agent-status online';
+  } catch (err) {
+    console.error('Failed to reload dashboard data:', err);
+    if (statusDot) statusDot.className = 'agent-status offline';
+  }
 }
 
 const qrcodegen = (function() {

@@ -376,6 +376,138 @@ DASHBOARD_ALLOW_HTTP=true node server.js
 - Add IP allowlisting
 - Consider VPN (Tailscale, WireGuard) instead
 
+## 🌐 Multi-Agent Setup
+
+Monitor multiple OpenClaw instances running on different machines from a single dashboard. The central dashboard proxies requests to remote agent servers over Tailscale.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Central Dashboard                             │
+│              (Blasai Mac mini, port 7001)                        │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │     server.js + index.html + agents.json                │    │
+│  │     - Serves dashboard UI                                │    │
+│  │     - Handles auth                                       │    │
+│  │     - Proxies API calls to remote agents                │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+           │                    │                    │
+           ▼                    ▼                    ▼
+    ┌────────────┐      ┌────────────┐      ┌────────────┐
+    │   Local    │      │  Yoshua    │      │  Carlos    │
+    │  (Blas)    │      │ (100.x.x.x)│      │ (100.x.x.x)│
+    │ filesystem │      │agent-server│      │agent-server│
+    │   direct   │      │  :7002     │      │  :7002     │
+    └────────────┘      └────────────┘      └────────────┘
+```
+
+### Quick Start
+
+1. **Configure agents** — Edit `agents.json` on the central dashboard:
+   ```json
+   {
+     "agents": [
+       {
+         "id": "blas",
+         "name": "Blas",
+         "emoji": "🦞",
+         "url": "local",
+         "token": null
+       },
+       {
+         "id": "yoshua",
+         "name": "Yoshua",
+         "emoji": "🤖",
+         "url": "http://100.86.38.37:7002",
+         "token": "your-secret-token-here"
+       }
+     ]
+   }
+   ```
+
+2. **Deploy agent-server.js** on each remote machine:
+   ```bash
+   # Copy agent-server.js to the remote machine
+   scp agent-server.js user@remote-machine:~/openclaw-dashboard/
+
+   # On the remote machine, start the agent server
+   AGENT_TOKEN=your-secret-token-here \
+   AGENT_NAME="Yoshua" \
+   WORKSPACE_DIR=/path/to/workspace \
+   node agent-server.js
+   ```
+
+3. **Use the agent switcher** — In the dashboard sidebar, click the agent dropdown to switch between agents.
+
+### Agent Server Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_SERVER_PORT` | Port for the agent server | `7002` |
+| `AGENT_NAME` | Display name for this agent | hostname |
+| `AGENT_TOKEN` | Shared secret for authentication | *(none, required)* |
+| `WORKSPACE_DIR` | OpenClaw workspace path | current directory |
+| `OPENCLAW_DIR` | OpenClaw config directory | `~/.openclaw` |
+| `OPENCLAW_AGENT` | Agent ID to monitor | `main` |
+
+### Running as a Systemd Service (Remote Machines)
+
+Create `/etc/systemd/system/openclaw-agent-server.service`:
+
+```ini
+[Unit]
+Description=OpenClaw Agent Server
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/openclaw-dashboard
+Environment="AGENT_TOKEN=your-secret-token"
+Environment="AGENT_NAME=Yoshua"
+Environment="WORKSPACE_DIR=/path/to/workspace"
+ExecStart=/usr/bin/node agent-server.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable openclaw-agent-server
+sudo systemctl start openclaw-agent-server
+```
+
+### Agent Server Endpoints
+
+The agent server exposes these read-only endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check (no auth required) |
+| `GET /api/sessions` | Session data |
+| `GET /api/usage` | Rate limit usage data |
+| `GET /api/costs` | Cost breakdown |
+| `GET /api/system` | System health (CPU, RAM, disk) |
+| `GET /api/memory-files` | List memory files |
+| `GET /api/memory-file?path=` | Read a memory file |
+| `GET /api/crons` | Cron job status |
+| `GET /api/logs?service=&lines=` | Service logs (Linux only) |
+| `GET /api/claude-usage` | Claude usage data |
+| `GET /api/gemini-usage` | Gemini usage data |
+
+### Security Considerations
+
+- **Shared secret authentication** — The `AGENT_TOKEN` must match between `agents.json` and the remote agent server
+- **Read-only** — The agent server only exposes read-only endpoints; no write operations or service control
+- **Tailscale recommended** — Use Tailscale for secure connectivity between machines
+- **No auth UI** — The agent server has no login page; authentication is via Bearer token only
+
 ## 🛠️ Troubleshooting
 
 ### "Too many failed attempts"
