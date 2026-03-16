@@ -166,17 +166,15 @@ body {
 }
 
 .agent-dropdown {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
+  position: fixed;
   margin-top: 4px;
+  min-width: 200px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  z-index: 200;
+  z-index: 99999;
   display: none;
 }
 
@@ -1494,7 +1492,6 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
           <span class="agent-name" id="currentAgentName">Blas</span>
           <span class="agent-status checking" id="agentStatusDot"></span>
         </div>
-        <div class="agent-dropdown" id="agentDropdown"></div>
       </div>
     </div>
     <nav class="nav">
@@ -2943,6 +2940,14 @@ function renderAgentDropdown() {
 function toggleAgentDropdown(event) {
   event.stopPropagation();
   const dropdown = document.getElementById('agentDropdown');
+  const btn = event.currentTarget;
+  const rect = btn.getBoundingClientRect();
+
+  // Position using fixed coords so it escapes the sidebar's stacking context
+  dropdown.style.top = (rect.bottom + 4) + 'px';
+  dropdown.style.left = rect.left + 'px';
+  dropdown.style.minWidth = Math.max(rect.width, 200) + 'px';
+
   dropdown.classList.toggle('open');
 
   // Close dropdown when clicking outside
@@ -5972,5 +5977,7 @@ async function dockerAction(action, id) {
   } catch(e) { showToast('Error: ' + e.message, 'warning'); }
 }
 </script>
+<!-- Agent dropdown rendered at body level to escape sidebar stacking context -->
+<div class="agent-dropdown" id="agentDropdown"></div>
 </body>
 </html>
