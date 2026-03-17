@@ -40,6 +40,8 @@ const memoryMdPath = path.join(WORKSPACE_DIR, 'MEMORY.md');
 const heartbeatPath = path.join(WORKSPACE_DIR, 'HEARTBEAT.md');
 const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
 const geminiUsageFile = path.join(dataDir, 'gemini-usage.json');
+const skillsDir = path.join(WORKSPACE_DIR, 'skills');
+const workspaceFilenames = ['AGENTS.md','HEARTBEAT.md','IDENTITY.md','MEMORY.md','SOUL.md','TOOLS.md','USER.md'];
 const pricingFile = path.join(WORKSPACE_DIR, 'data', 'model_pricing_usd_per_million.json');
 
 // Model pricing
@@ -736,6 +738,67 @@ let usageCacheTime = 0;
 let costCache = null;
 let costCacheTime = 0;
 
+// ── Key Files (workspace files + skills) ────────────────────────────────────
+
+function getKeyFiles() {
+  const files = [];
+  // Workspace root files
+  for (const fname of workspaceFilenames) {
+    const fpath = path.join(WORKSPACE_DIR, fname);
+    try {
+      if (fs.existsSync(fpath)) {
+        const stat = fs.statSync(fpath);
+        files.push({ name: fname, modified: stat.mtimeMs, size: stat.size, editable: false });
+      }
+    } catch {}
+  }
+  // Skills directory
+  try {
+    if (fs.existsSync(skillsDir)) {
+      const entries = fs.readdirSync(skillsDir).sort();
+      for (const e of entries) {
+        const entryPath = path.join(skillsDir, e);
+        try {
+          const stat = fs.statSync(entryPath);
+          if (stat.isDirectory()) {
+            const skillMd = path.join(entryPath, 'SKILL.md');
+            if (fs.existsSync(skillMd)) {
+              const fstat = fs.statSync(skillMd);
+              files.push({ name: 'skills/' + e + '/SKILL.md', modified: fstat.mtimeMs, size: fstat.size, editable: false });
+            }
+          } else if (e.endsWith('.md')) {
+            files.push({ name: 'skills/' + e, modified: stat.mtimeMs, size: stat.size, editable: false });
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return files;
+}
+
+function buildKeyFilesAllowed() {
+  const map = {};
+  for (const fname of workspaceFilenames) {
+    const fpath = path.join(WORKSPACE_DIR, fname);
+    if (fs.existsSync(fpath)) map[fname] = fpath;
+  }
+  try {
+    if (fs.existsSync(skillsDir)) {
+      for (const e of fs.readdirSync(skillsDir).sort()) {
+        const ep = path.join(skillsDir, e);
+        const stat = fs.statSync(ep);
+        if (stat.isDirectory()) {
+          const sm = path.join(ep, 'SKILL.md');
+          if (fs.existsSync(sm)) map['skills/' + e + '/SKILL.md'] = sm;
+        } else if (e.endsWith('.md')) {
+          map['skills/' + e] = ep;
+        }
+      }
+    }
+  } catch {}
+  return map;
+}
+
 // HTTP Server
 const server = http.createServer((req, res) => {
   setCORSHeaders(res);
@@ -859,6 +922,40 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // Key files list (workspace files + skills)
+    if (url.pathname === '/api/key-files') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getKeyFiles()));
+      return;
+    }
+
+    // Key file content (read-only)
+    if (url.pathname === '/api/key-file' && req.method === 'GET') {
+      const fname = url.searchParams.get('name') || '';
+      // Path traversal guard
+      if (fname.includes('..') || fname.includes('\0')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid file name' }));
+        return;
+      }
+      const allowed = buildKeyFilesAllowed();
+      const fpath = allowed[fname];
+      if (!fpath) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'File not found or not allowed' }));
+        return;
+      }
+      try {
+        const content = fs.readFileSync(fpath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ name: fname, content, editable: false }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to read file' }));
+      }
+      return;
+    }
+
     // 404 for unknown endpoints
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
@@ -893,6 +990,8 @@ server.listen(PORT, () => {
   console.log('    GET /api/logs        - Service logs');
   console.log('    GET /api/claude-usage - Claude usage');
   console.log('    GET /api/gemini-usage - Gemini usage');
+  console.log('    GET /api/key-files   - Workspace files + skills list');
+  console.log('    GET /api/key-file    - Read a workspace/skill file (read-only)');
   console.log('');
   console.log('═══════════════════════════════════════════════════════════');
   console.log('');
